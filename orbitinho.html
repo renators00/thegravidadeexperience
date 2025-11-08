@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Orbitinho: Demo</title>
+<style>
+    html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+canvas {
+    display: block;
+    background: #87FD3A;
+}
+#menu {
+    background: url("start.png") no-repeat fixed center;
+    background-size: cover;
+    position:absolute;
+    top:0;
+    left:0;
+    width:100%;
+    height:100%;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    flex-direction: column;
+    color:#fff;
+    font-size:36px;
+    cursor:pointer;
+    text-align:center;
+}
+#menu:hover {
+    color:#f39c12;
+}
+#footerInstructions {
+    position: absolute;
+    bottom: 30px;
+    width: 100%;
+    text-align: center;
+    color: #fff;
+    font-size: 14px;
+    font-family: Arial, sans-serif;
+    pointer-events: none;
+}
+#flash {
+    position: fixed;
+    top:0;
+    left:0;
+    width:100vw;
+    height:100vh;
+    background:red;
+    opacity:0;
+    pointer-events:none;
+    transition: opacity 0.15s;
+}
+
+</style>
+</head>
+<body>
+<div id="menu"></div>
+<button id="muteBtn" style="
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 10;
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+">Mute</button>
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+<div id="flash"></div>
+
+<div id="resultDiv" style="
+    position:absolute;
+    top:50%;
+    left:50%;
+    transform:translate(-50%, -50%);
+    background: rgba(0,0,0,0.9);
+    color: #fff;
+    padding: 30px;
+    text-align: center;
+    font-size: 24px;
+    display:none;
+    border-radius: 10px;
+">
+    <div id="finalScore"></div>
+    <button id="shareBtn" style="margin-top:20px;padding:10px 20px;font-size:18px;cursor:pointer;">Compartilhar no Instagram</button>
+    <br><br>
+    <button id="restartBtn" style="padding:10px 20px;font-size:18px;cursor:pointer;">Jogar Novamente</button>
+</div>
+
+<script>
+// --- Canvas ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.style.display='none';
+const menu = document.getElementById('menu');
+
+// --- Timer ---
+let startTime = 0;
+let pausedTime = null; // <<-- guarda o instante do game over
+const maxTime = 20 * 1000; // Tempo de jogo
+
+// --- Teclas ---
+const keys = { w:false, a:false, s:false, d:false };
+document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+// --- Sprites ---
+const dogImg = new Image(); dogImg.src='dog.png';
+const boneImg = new Image(); boneImg.src='bone.png';
+const meteorImg = new Image(); meteorImg.src='meteor.png';
+const rocketImg = new Image(); rocketImg.src='rocket.png';
+const fireImg = new Image(); fireImg.src='fire.png';
+
+// --- Sons ---
+const collectSound = new Audio('https://www.soundjay.com/button/sounds/button-3.mp3');
+collectSound.preload = 'auto';
+const thrustSound = new Audio('https://www.soundjay.com/button/sounds/button-16.mp3');
+thrustSound.preload = 'auto';
+thrustSound.loop = true;
+const music = new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3');
+music.preload = 'auto';
+music.loop = true;
+
+const muteBtn = document.getElementById('muteBtn');
+let isMuted = false;
+let isThrustPlaying = false;
+
+function safePlay(audio){
+    audio.play().catch(err => {
+        console.warn('Audio play blocked or failed:', err);
+    });
+}
+
+function safePause(audio){
+    try { audio.pause(); } catch(e){ console.warn('Audio pause failed:', e); }
+}
+
+muteBtn.addEventListener('click', () => {
+    isMuted = !isMuted;
+    [music, thrustSound, collectSound].forEach(a => a.muted = isMuted);
+    muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+});
+
+// --- Menu click: iniciar jogo e também iniciar música (resolver autoplay) ---
+menu.addEventListener('click', () => {
+    menu.style.display = 'none';
+    canvas.style.display = 'block';
+    document.getElementById('resultDiv').style.display = 'none';
+
+    // reset do tempo pausado se houver
+    pausedTime = null;
+    startTime = Date.now();
+    gameOver = false;
+
+    if(!isMuted){
+        safePlay(music);
+    }
+
+    [collectSound, thrustSound, music].forEach(a => {
+        a.addEventListener('canplaythrough', () => {}, { once: true });
+    });
+
+    gameLoop();
+});
+
+// --- Dog ---
+const dog = {x:100,y:300,width:75,height:75,vx:0,vy:0,speed:0.35,maxSpeed:5,friction:0.97};
+
+// --- Rocket (NOVO: declarado global) ---
+let rocket = null;
+
+// --- Níveis ---
+let level = 0;
+const levels = [
+    {planetX:650,planetY:150,planetRadius:40,boneCount:5,meteorCount:4},
+    {planetX:200,planetY:500,planetRadius:30,boneCount:7,meteorCount:6},
+    {planetX:400,planetY:300,planetRadius:50,boneCount:10,meteorCount:8}
+];
+let bones = [], obstacles = [], score = 0;
+
+function initLevel(lvl){
+    bones=[]; obstacles=[];
+    const centerX = canvas.width/2;
+    const centerY = canvas.height/2;
+
+    for(let i=0;i<levels[lvl].boneCount;i++)
+    bones.push({
+        x: Math.random() * (canvas.width - 50) + 25,
+        y: Math.random() * (canvas.height - 50) + 25,
+        width:30,
+        height:30,
+        collected:false
+    });
+
+    for(let i=0;i<levels[lvl].meteorCount;i++){
+        const side = Math.floor(Math.random() * 4);
+        let x, y;
+
+        switch(side){
+            case 0: x = Math.random() * canvas.width; y = -50; break;
+            case 1: x = Math.random() * canvas.width; y = canvas.height + 50; break;
+            case 2: x = -50; y = Math.random() * canvas.height; break;
+            case 3: x = canvas.width + 50; y = Math.random() * canvas.height; break;
+        }
+
+        const dx = centerX - x;
+        const dy = centerY - y;
+        const distance = Math.sqrt(dx*dx + dy*dy);
+        const speed = Math.random() * 2 + 1;
+
+        obstacles.push({
+            x: x,
+            y: y,
+            width: 50,
+            height: 50,
+            vx: (dx / distance) * speed,
+            vy: (dy / distance) * speed
+        });
+    }
+
+    dog.x=100; dog.y=300; dog.vx=0; dog.vy=0;
+
+    // --- NOVO: inicializar rocket
+    rocket = {
+        x: levels[lvl].planetX,
+        y: levels[lvl].planetY,
+        radius: levels[lvl].planetRadius,
+        vx: (Math.random() * 2 - 1) * 1.2,
+        vy: (Math.random() * 2 - 1) * 1.2
+    };
+}
+initLevel(level);
+
+// --- Parallax ---
+const starsLayer1=[], starsLayer2=[];
+function generateStars() {
+    starsLayer1.length = 0;
+    starsLayer2.length = 0;
+
+    for(let i=0; i< Math.floor(canvas.width * canvas.height / 15000); i++) {
+        starsLayer1.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            size: 8
+        });
+    }
+
+    for(let i=0; i< Math.floor(canvas.width * canvas.height / 8000); i++) {
+        starsLayer2.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            size: 5
+        });
+    }
+}
+generateStars();
+
+// --- Colisão ---
+function isColliding(a,b){ return a.x < b.x+b.width && a.x+a.width > b.x && a.y < b.y+b.height && a.y+a.height > b.y; }
+
+// --- Partículas ---
+const particles=[];
+function spawnParticle(x,y,color){
+    particles.push({x,y,vx:(Math.random()-0.5)*2,vy:(Math.random()-0.5)*2,life:30,color});
+}
+
+// --- Fim de jogo ---
+function endGame(){
+    // ... seu código atual ...
+
+    setTimeout(()=>{ document.getElementById('flash').style.opacity = 0; },150);
+
+    // gameOver já normalmente foi setado antes de chamar endGame,
+    // mas deixamos aqui também para garantir consistência
+    gameOver = true;
+
+    const resultDiv = document.getElementById('resultDiv');
+    const finalScore = document.getElementById('finalScore');
+
+    finalScore.innerHTML = `Fim do jogo!<br>Você coletou <span style="color:#FFD700;">${score}</span> corações`;
+    resultDiv.style.display = 'block';
+
+    document.getElementById('shareBtn').onclick = ()=> {
+        navigator.clipboard.writeText(`Joguei CosmoDog e coletei ${score} corações! #CosmoDogGame`)
+            .then(()=>alert('Resultado copiado! Agora cole no Instagram.'))
+            .catch(()=>alert('Não foi possível copiar.'));
+    };
+
+    document.getElementById('restartBtn').onclick = ()=> {
+        resultDiv.style.display='none';
+        score=0;
+        level=0;
+        dog.x = 100; dog.y = 300; dog.vx = 0; dog.vy = 0;
+        dog.speed = 0.35; dog.maxSpeed = 5; dog.friction = 0.97;
+        initLevel(level);
+        pausedTime = null;
+        startTime = Date.now();
+        gameOver = false;
+        canvas.style.display='block';
+        // restart loop
+        gameLoop();
+    };
+}
+
+// --- Atualização ---
+function update(){
+    // bloqueia todo processamento se o jogo já acabou
+    if (gameOver) return;
+
+    const elapsedTime = Date.now() - startTime;
+    const speedMultiplier = 1 + 2 * (elapsedTime / maxTime);
+
+    if(elapsedTime >= maxTime){
+        // captura o momento exato do fim por tempo
+        pausedTime = Date.now();
+        endGame();
+        return;
+    }
+
+    if(keys.w){ dog.vy -= dog.speed; if(!thrustSound.playing) safePlay(thrustSound); }
+    if(keys.s) dog.vy += dog.speed;
+    if(keys.a) dog.vx -= dog.speed;
+    if(keys.d) dog.vx += dog.speed;
+
+    dog.vx = Math.max(Math.min(dog.vx,dog.maxSpeed),-dog.maxSpeed);
+    dog.vy = Math.max(Math.min(dog.vy,dog.maxSpeed),-dog.maxSpeed);
+
+    dog.x += dog.vx; dog.y += dog.vy;
+    dog.vx *= dog.friction; dog.vy *= dog.friction;
+
+    if(dog.x<0){ dog.x=0; dog.vx*=-0.5; }
+    if(dog.x+dog.width>canvas.width){ dog.x=canvas.width-dog.width; dog.vx*=-0.5; }
+    if(dog.y<0){ dog.y=0; dog.vy*=-0.5; }
+    if(dog.y+dog.height>canvas.height){ dog.y=canvas.height-dog.height; dog.vy*=-0.5; }
+
+    bones.forEach((b, index)=>{
+        if(!b.collected && isColliding(dog,b) && !gameOver){
+            b.collected = true;
+            score++;
+            collectSound.currentTime = 0;
+            collectSound.play();
+            for(let i=0; i<10; i++) spawnParticle(b.x+15, b.y+15, '#fff');
+
+            bones[index] = {
+                x: Math.random() * (canvas.width - 50) + 25,
+                y: Math.random() * (canvas.height - 50) + 25,
+                width: 30,
+                height: 30,
+                collected: false
+            };
+        }
+    });
+
+    const centerX = canvas.width/2;
+    const centerY = canvas.height/2;
+
+    obstacles.forEach(obs=>{
+        obs.x += obs.vx * speedMultiplier;
+        obs.y += obs.vy * speedMultiplier;
+
+        if(obs.x < -100 || obs.x > canvas.width + 100 || obs.y < -100 || obs.y > canvas.height + 100){
+            const side = Math.floor(Math.random() * 4);
+            switch(side){
+                case 0: obs.x = Math.random() * canvas.width; obs.y = -50; break;
+                case 1: obs.x = Math.random() * canvas.width; obs.y = canvas.height + 50; break;
+                case 2: obs.x = -50; obs.y = Math.random() * canvas.height; break;
+                case 3: obs.x = canvas.width + 50; obs.y = Math.random() * canvas.height; break;
+            }
+
+            const dx = centerX - obs.x;
+            const dy = centerY - obs.y;
+            const distance = Math.sqrt(dx*dx + dy*dy);
+            const speed = Math.random() * 2 + 1;
+
+            obs.vx = (dx / distance) * speed;
+            obs.vy = (dy / distance) * speed;
+        }
+
+        if(isColliding(dog,obs)){
+            if(dog.x<obs.x) dog.vx=-Math.abs(dog.vx); else dog.vx=Math.abs(dog.vx);
+            if(dog.y<obs.y) dog.vy=-Math.abs(dog.vy); else dog.vy=Math.abs(dog.vy);
+            if(score>0) score--;
+            for(let i=0;i<20;i++){
+                const color = ['#ff0000','#ffa500','#ffff00'][Math.floor(Math.random()*3)];
+                spawnParticle(dog.x + dog.width/2, dog.y + dog.height/2, color);
+            }
+        }
+
+        // TOUCH direction to dog
+if(touchActive){
+    const dx = touchX - (dog.x + dog.width/2);
+    const dy = touchY - (dog.y + dog.height/2);
+    const dist = Math.hypot(dx,dy);
+    if(dist > 20){
+        dog.vx += (dx/dist) * dog.speed;
+        dog.vy += (dy/dist) * dog.speed;
+    }
+}
+
+    });
+
+    // dog encosta no rocket = explode + game over
+    {
+        const dx = dog.x - rocket.x;
+        const dy = dog.y - rocket.y;
+        const dist = Math.hypot(dx,dy);
+
+        const dogRadius = 35; // ajuste
+
+       if(dist < dogRadius + rocket.radius){
+
+            for(let i=0;i<40;i++){
+                const color = ['#ff0000','#ffa500','#ffff00'][Math.floor(Math.random()*3)];
+                spawnParticle(dog.x + dog.width/2, dog.y + dog.height/2, color);
+            }
+
+            dog.x = -9999;
+
+            pausedTime = Date.now();
+            score = 0;
+
+            // <<< AQUI
+            document.getElementById('flash').style.opacity = 0.6;
+
+            gameOver = true;
+            endGame();
+        }
+
+    }
+
+    // --- NOVO: mover rocket e rebater
+    if (rocket) {
+        rocket.x += rocket.vx;
+        rocket.y += rocket.vy;
+
+        if (rocket.x < rocket.radius) {
+            rocket.x = rocket.radius;
+            rocket.vx *= -1.50;
+        } else if (rocket.x > canvas.width - rocket.radius) {
+            rocket.x = canvas.width - rocket.radius;
+            rocket.vx *= -1.50;
+        }
+
+        if (rocket.y < rocket.radius) {
+            rocket.y = rocket.radius;
+            rocket.vy *= -1;
+        } else if (rocket.y > canvas.height - rocket.radius) {
+            rocket.y = canvas.height - rocket.radius;
+            rocket.vy *= -1;
+        }
+        for (let i = bones.length-1; i >= 0; i--){
+            const b = bones[i];
+
+            // ajuste o size se seu bone não tiver radius
+            const boneRadius = 25; // ajuste se seu bone é maior/menor
+
+            const dx = rocket.x - b.x;
+            const dy = rocket.y - b.y;
+            const dist = Math.hypot(dx,dy);
+
+            if(dist < rocket.radius + boneRadius){
+                bones.splice(i,1);
+                score++;                   // ou outra ação
+                safePlay(collectSound);    // se quiser som
+            }
+        }
+    }
+
+    starsLayer1.forEach(s => { s.x -= 0.1; if(s.x < 0) s.x = canvas.width; });
+    starsLayer2.forEach(s => { s.x -= 0.05; if(s.x < 0) s.x = canvas.width; });
+
+    for(let i=particles.length-1;i>=0;i--){
+        const p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.life--;
+        if(p.life<=0) particles.splice(i,1);
+    }
+}
+
+// --- Desenho ---
+function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    starsLayer1.forEach(s => { ctx.fillStyle = '#fff'; ctx.fillRect(s.x, s.y, s.size, s.size); });
+    starsLayer2.forEach(s => { ctx.fillStyle = '#fff'; ctx.fillRect(s.x, s.y, s.size, s.size); });
+
+    // --- NOVO: desenhar rocket dinâmico
+    const planet = levels[level];
+    if (rocket) {
+        ctx.drawImage(rocketImg, rocket.x - rocket.radius, rocket.y - rocket.radius, rocket.radius*2, rocket.radius*2);
+    } else {
+        ctx.drawImage(rocketImg, planet.planetX - planet.planetRadius, planet.planetY - planet.planetRadius, planet.planetRadius*2, planet.planetRadius*2);
+    }
+
+    bones.forEach(b=>{ if(!b.collected) ctx.drawImage(boneImg,b.x,b.y,b.width,b.height); });
+    obstacles.forEach(obs=>{ ctx.drawImage(meteorImg, obs.x, obs.y, obs.width, obs.height); });
+
+    particles.forEach(p=>{
+        ctx.fillStyle=p.color;
+        ctx.globalAlpha=p.life/30;
+        ctx.fillRect(p.x,p.y,3,3);
+        ctx.globalAlpha=1;
+    });
+
+    ctx.drawImage(dogImg,dog.x,dog.y,dog.width,dog.height);
+    if(keys.w) ctx.drawImage(fireImg,dog.x+25,dog.y+75,25,35);
+
+    // usa pausedTime quando o jogo está parado, para congelar o timer
+    let remainingMs;
+    if (gameOver && pausedTime !== null) {
+        remainingMs = Math.max(0, maxTime - (pausedTime - startTime));
+    } else {
+        remainingMs = Math.max(0, maxTime - (Date.now() - startTime));
+    }
+    const elapsed = (remainingMs / 1000).toFixed(1);
+
+    ctx.fillStyle = '#000';
+    ctx.font = '22px "Consolas"';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 0;
+    ctx.fillText(`Corações: ${score}   Tempo: ${elapsed}s`, 10, 30);
+    ctx.shadowBlur = 0;
+}
+
+
+
+// --- TOUCH CONTROL (drag finger)
+let touchActive = false;
+let touchX = 0;
+let touchY = 0;
+
+canvas.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    touchX = t.clientX;
+    touchY = t.clientY;
+    touchActive = true;
+});
+
+canvas.addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    touchX = t.clientX;
+    touchY = t.clientY;
+});
+
+canvas.addEventListener('touchend', () => {
+    touchActive = false;
+});
+
+
+// --- Loop ---
+function gameLoop(){
+    update();
+    draw();
+    // só pede novo frame se não estiver em gameOver
+    if (!gameOver) {
+        requestAnimationFrame(gameLoop);
+    }
+}
+
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    generateStars();
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// Carrega imagens
+dogImg.onload = ()=>{ boneImg.onload=()=>{ meteorImg.onload=()=>{ rocketImg.onload=()=>{}; }; }; };
+</script>
+<div id="footerInstructions">Use as teclas "W A S D" para mover — colecione corações e evite os meteoros!</div>
+</body>
+</html>
